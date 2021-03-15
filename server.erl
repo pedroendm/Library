@@ -4,7 +4,7 @@
 -import(lists, [foreach/2]).
 
 -export([setup/0, start/0, loop/0, reset/0,
-         show_table/1,
+         show_table/1, person_requests/1,
          add_person/4, remove_person/1
          ]).
 
@@ -13,7 +13,7 @@
 % book's primary key: id
 -record(book, {id, name, authors}).
 % request's primary key: {nrCC(person), id(book)}
--record(request, {id, nrCC}).
+-record(request, {id,valid}).
 
 
 bookshelf() -> [
@@ -33,11 +33,10 @@ setup() ->
     mnesia:wait_for_tables([person, book, request], 20000),
     mnesia:transaction(fun() -> foreach(fun mnesia:write/1, bookshelf()) end).
 
-start() -> spawn(fun() -> setup(), loop() end).
-
 loop() ->
   receive
     {show_table, From, Table} -> From ! show_table(Table), loop();
+    {person_requests, From, NrCC} -> From ! person_requests(NrCC), loop();
 
     {add_person, _, NrCC, Name, Address, Phone} -> add_person(NrCC, Name, Address, Phone), loop();
     {remove_person, _, NrCC} -> remove_person(NrCC), loop();
@@ -45,6 +44,8 @@ loop() ->
     {add_request, _, ID, NrCC} -> add_request(ID, NrCC), loop();
     {remove_request, _, ID, NrCC} -> remove_request(ID, NrCC), loop()
   end.
+
+start() -> spawn(fun() -> setup(), loop() end).
 
 reset() ->
   mnesia:clear_table(person),
@@ -54,6 +55,10 @@ reset() ->
 
 show_table(Table) ->
   do(qlc:q([X || X <- mnesia:table(Table)])).
+
+% Returns a list with the books requested by the person with CC number 'NrCC'
+person_requests(NrCC) ->
+ do(qlc:q([element(1, X#request.id) || X <- mnesia:table(request), element(2, X#request.id) == NrCC])).
 
 % Entry :: {tableName, attributes}
 add_entry(Entry) ->
@@ -66,8 +71,8 @@ remove_entry(OId) ->
 do(Q) ->
   F = fun() -> qlc:e(Q) end,
   case mnesia:transaction(F) of
-  {atomic, Val} -> Val;
-  {aborted, Reason} -> Reason
+    {atomic, Result} -> Result;
+    {aborted, Reason} -> Reason
   end.
 
 add_person(NrCC, Name, Address, Phone) ->
@@ -86,8 +91,7 @@ remove_person(NrCC) ->
 %  remove_entry(OId).
 
 add_request(ID, NrCC) ->
-  add_entry(#request{id=ID, nrCC=NrCC}).
+  add_entry(#request{id={ID, NrCC}, valid=true}).
 
 remove_request(ID, NrCC) ->
-  OId = {request, {ID, NrCC}},
-  remove_entry(OId).
+  add_entry(#request{id={ID, NrCC}, valid=false}).
