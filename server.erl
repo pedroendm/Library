@@ -1,24 +1,27 @@
 -module(server).
 
 -include_lib("stdlib/include/qlc.hrl").
--import(lists, [foreach/2]).
 
--export([setup/0, start/0, loop/0, reset/0,
-         show_table/1, person_requests/1,
-         add_person/4, remove_person/1
-         ]).
+-import(lists, [member/2, foreach/2]).
+-import(utils, [empty_list/1, or_list/1]).
+
+-export([setup/0, start/0, loop/0,
+         show_table/1, person_requests/1, book_requests/1,
+         add_person/4, remove_person/1]).
 
 % person's primary key: nrCC
--record(person, {nrCC, name, address, phone}).
+-record(person, {cc, name, address, phone}).
 % book's primary key: id
--record(book, {id, name, authors}).
-% request's primary key: {nrCC(person), id(book)}
--record(request, {id,valid}).
+-record(book, {id, title, authors}).
+% request's primary key: {id(book), nrCC(person)}
+-record(request, {id, valid}).
 
 
 bookshelf() -> [
   {book, 1, "Programming Erlang: software for a concurrent world", ["Joe Armstrong"]},
-  {book, 2, "The little book of Semaphores", ["Allen B. Downey"]}
+  {book, 2, "The little book of Semaphores", ["Allen B. Downey"]},
+  {book, 3, "Programming Erlang: software for a concurrent world", ["Joe Armstrong"]}
+
   %{book, 3, "Numerical Otimization", ["Jorge Nocedal", "Stephen J. Wrigth"]},
   %{book, 4, "A first course in mathematical modeling", ["Frank R. Giordano", "William P. Fox", "Steven B. Horton"]},
   %{book, 5, "Convex Optimization", ["Stephen Boyd", "Lieven Vandenberghe"]}
@@ -36,29 +39,47 @@ setup() ->
 loop() ->
   receive
     {show_table, From, Table} -> From ! show_table(Table), loop();
-    {person_requests, From, NrCC} -> From ! person_requests(NrCC), loop();
 
-    {add_person, _, NrCC, Name, Address, Phone} -> add_person(NrCC, Name, Address, Phone), loop();
-    {remove_person, _, NrCC} -> remove_person(NrCC), loop();
+    {person_requests, From, CC} -> From ! person_requests(CC), loop();
+    {book_requests, From, Title} -> From ! book_requests(Title), loop();
+    {book_is_requested, From, ID} -> From ! book_is_requested(ID), loop();
 
-    {add_request, _, ID, NrCC} -> add_request(ID, NrCC), loop();
-    {remove_request, _, ID, NrCC} -> remove_request(ID, NrCC), loop()
+    {add_person, From, CC, Name, Address, Phone} -> From ! add_person(CC, Name, Address, Phone), loop();
+    {remove_person, From, CC} -> From ! remove_person(CC), loop();
+
+    {add_request, From, ID, CC} -> From ! add_request(ID, CC), loop();
+    {remove_request, From, ID, CC} -> From ! remove_request(ID, CC), loop()
   end.
 
 start() -> spawn(fun() -> setup(), loop() end).
-
-reset() ->
-  mnesia:clear_table(person),
-  mnesia:clear_table(book),
-  mnesia:clear_table(bookshelf),
-  mnesia:transaction(fun() -> foreach(fun mnesia:write/1, bookshelf()) end).
 
 show_table(Table) ->
   do(qlc:q([X || X <- mnesia:table(Table)])).
 
 % Returns a list with the books requested by the person with CC number 'NrCC'
-person_requests(NrCC) ->
- do(qlc:q([element(1, X#request.id) || X <- mnesia:table(request), element(2, X#request.id) == NrCC])).
+person_requests(CC) ->
+ do(qlc:q([element(1, X#request.id) || X <- mnesia:table(request), element(2, X#request.id) == CC])).
+
+% Returns a list with the people that request the book with title "Title"
+book_requests(Title) ->
+  case exist_book_title(Title) of
+    false -> {aborted, invalid_book_title};
+    true ->
+      % Get possible codes for the book with title Title
+      Codes = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])),
+      % Get every person that request one of this codes
+      CCs = do(qlc:q([element(2, X#request.id) || X <- mnesia:table(request), member(element(1, X#request.id), Codes)])),
+      {atomic, CCs}
+  end.
+
+% Returns true if the book is already requested, false otherwise.
+book_is_requested(ID) ->
+  case exist_book_id(ID) of
+    false -> {aborted, invalid_book_id};
+    true -> Flags = do(qlc:q([X#request.valid || X <- mnesia:table(request), element(1, X#request.id) == ID])),
+            Is_Requested = utils:or_list(Flags),
+            {atomic, Is_Requested}
+  end.
 
 % Entry :: {tableName, attributes}
 add_entry(Entry) ->
@@ -75,23 +96,49 @@ do(Q) ->
     {aborted, Reason} -> Reason
   end.
 
-add_person(NrCC, Name, Address, Phone) ->
-  add_entry(#person{nrCC=NrCC, name=Name, address=Address, phone=Phone}).
+add_person(CC, Name, Address, Phone) ->
+  case exist_person_cc(CC) of
+     false -> add_entry(#person{cc=CC, name=Name, address=Address, phone=Phone}), {atomic};
+     true -> {aborted, duplicate_person_cc}
+  end.
 
-remove_person(NrCC) ->
-  OId = {person, NrCC},
-  remove_entry(OId).
+remove_person(CC) ->
+  case exist_person_cc(CC) of
+    false -> {aborted, invalid_person_cc};
+    true ->  OId = {person, CC}, remove_entry(OId), {atomic}
+  end.
 
-%
-%add_book({ID, Name, Authors}) ->
-%  add_entry(#book{id=ID, name=Name, authors=Authors}).
+add_request(ID, CC) ->
+  case exist_book_id(ID) of
+    false -> {aborted, invalid_book_id};
+    true -> case exist_person_cc(CC) of
+              false -> {aborted, invalid_person_cc};
+              true -> case book_is_requested(ID) of % See if already requested
+                        false -> add_entry(#request{id={ID, CC}, valid=true}), {atomic};
+                        true  -> {aborted, book_is_requested}
+                      end
+            end
+  end.
 
-%remove_book(ID) ->
-%  OId = {book, ID},
-%  remove_entry(OId).
+remove_request(ID, CC) ->
+  case exist_book_id(ID) of
+    false -> {aborted, invalid_book_id};
+    true -> case exist_person_cc(CC) of
+              false -> {aborted, invalid_person_cc};
+              % BUG HERE: if theres no such entry, add one false returned
+              %           Care can be requested by other
+              true -> add_entry(#request{id={ID, CC}, valid=false}), {atomic}
+            end
+  end.
 
-add_request(ID, NrCC) ->
-  add_entry(#request{id={ID, NrCC}, valid=true}).
+exist_person_cc(CC) ->
+  People = do(qlc:q([X || X <- mnesia:table(person), X#person.cc == CC])),
+  not(utils:empty_list(People)).
 
-remove_request(ID, NrCC) ->
-  add_entry(#request{id={ID, NrCC}, valid=false}).
+exist_book_title(Title) ->
+  Books = do(qlc:q([X || X <- mnesia:table(book), X#book.title == Title])),
+  not(utils:empty_list(Books)).
+
+exist_book_id(ID) ->
+  Books = do(qlc:q([X || X <- mnesia:table(book), X#book.id == ID])),
+  not(utils:empty_list(Books)).
