@@ -18,9 +18,9 @@
 
 
 bookshelf() -> [
-  {book, 1, "Programming Erlang: software for a concurrent world", ["Joe Armstrong"]},
-  {book, 2, "The little book of Semaphores", ["Allen B. Downey"]},
-  {book, 3, "Programming Erlang: software for a concurrent world", ["Joe Armstrong"]}
+  {book, 1, "Programming Erlang: software for a concurrent world", {"Joe Armstrong"}},
+  {book, 2, "The little book of Semaphores", {"Allen B. Downey"}},
+  {book, 3, "Programming Erlang: software for a concurrent world", {"Joe Armstrong"}}
 
   %{book, 3, "Numerical Otimization", ["Jorge Nocedal", "Stephen J. Wrigth"]},
   %{book, 4, "A first course in mathematical modeling", ["Frank R. Giordano", "William P. Fox", "Steven B. Horton"]},
@@ -39,47 +39,22 @@ setup() ->
 loop() ->
   receive
     {show_table, From, Table} -> From ! show_table(Table), loop();
-
-    {person_requests, From, CC} -> From ! person_requests(CC), loop();
-    {book_requests, From, Title} -> From ! book_requests(Title), loop();
-    {book_is_requested, From, ID} -> From ! book_is_requested(ID), loop();
-
     {add_person, From, CC, Name, Address, Phone} -> From ! add_person(CC, Name, Address, Phone), loop();
     {remove_person, From, CC} -> From ! remove_person(CC), loop();
 
+    % Lookup
+    {person_requests, From, CC} -> From ! person_requests(CC), loop();
+    {book_requests, From, Title} -> From ! book_requests(Title), loop();
+    {book_is_requested, From, ID} -> From ! book_is_requested(ID), loop();
+    {book_ids, From, Title} -> From ! book_ids(Title), loop();
+    {person_num_requests, From, CC} -> From ! person_num_requests(CC), loop();
+
+    % Update
     {add_request, From, ID, CC} -> From ! add_request(ID, CC), loop();
     {remove_request, From, ID, CC} -> From ! remove_request(ID, CC), loop()
   end.
 
 start() -> spawn(fun() -> setup(), loop() end).
-
-show_table(Table) ->
-  do(qlc:q([X || X <- mnesia:table(Table)])).
-
-% Returns a list with the books requested by the person with CC number 'NrCC'
-person_requests(CC) ->
- do(qlc:q([element(1, X#request.id) || X <- mnesia:table(request), element(2, X#request.id) == CC])).
-
-% Returns a list with the people that request the book with title "Title"
-book_requests(Title) ->
-  case exist_book_title(Title) of
-    false -> {aborted, invalid_book_title};
-    true ->
-      % Get possible codes for the book with title Title
-      Codes = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])),
-      % Get every person that request one of this codes
-      CCs = do(qlc:q([element(2, X#request.id) || X <- mnesia:table(request), member(element(1, X#request.id), Codes)])),
-      {atomic, CCs}
-  end.
-
-% Returns true if the book is already requested, false otherwise.
-book_is_requested(ID) ->
-  case exist_book_id(ID) of
-    false -> {aborted, invalid_book_id};
-    true -> Flags = do(qlc:q([X#request.valid || X <- mnesia:table(request), element(1, X#request.id) == ID])),
-            Is_Requested = utils:or_list(Flags),
-            {atomic, Is_Requested}
-  end.
 
 % Entry :: {tableName, attributes}
 add_entry(Entry) ->
@@ -96,6 +71,10 @@ do(Q) ->
     {aborted, Reason} -> Reason
   end.
 
+show_table(Table) ->
+  do(qlc:q([X || X <- mnesia:table(Table)])).
+
+
 add_person(CC, Name, Address, Phone) ->
   case exist_person_cc(CC) of
      false -> add_entry(#person{cc=CC, name=Name, address=Address, phone=Phone}), {atomic};
@@ -108,14 +87,60 @@ remove_person(CC) ->
     true ->  OId = {person, CC}, remove_entry(OId), {atomic}
   end.
 
+
+% Returns a list with the books' id requested by the person with CC number 'NrCC'
+person_requests(CC) ->
+  case exist_person_cc(CC) of
+    false -> {aborted, invalid_person_cc};
+    true -> Requests = do(qlc:q([element(1, X#request.id) || X <- mnesia:table(request), element(2, X#request.id) == CC])),
+            {atomic, Requests}
+  end.
+
+% Returns a list with the people that request the book with title "Title"
+book_requests(Title) ->
+  case exist_book_title(Title) of
+    false -> {aborted, invalid_book_title};
+    true ->
+      % Get possible codes for the book with title Title
+      IDs = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])),
+      % Get every person that request one of this codes
+      CCs = do(qlc:q([element(2, X#request.id) || X <- mnesia:table(request), member(element(1, X#request.id), IDs)])),
+      {atomic, CCs}
+  end.
+
+% Returns true if the book is already requested, false otherwise.
+book_is_requested(ID) ->
+  case exist_book_id(ID) of
+    false -> {aborted, invalid_book_id};
+    true -> Flags = do(qlc:q([X#request.valid || X <- mnesia:table(request), element(1, X#request.id) == ID])),
+            Is_Requested = utils:or_list(Flags),
+            {atomic, Is_Requested}
+  end.
+
+% Returns the ids of the book with title 'Title'
+book_ids(Title) ->
+  case exist_book_title(Title) of
+    false -> {aborted, invalid_book_title};
+    true -> IDs = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])),
+            {atomic, IDs}
+  end.
+
+% Returns the number of requests made by the person with CC number 'CC'
+person_num_requests(CC) ->
+  case exist_person_cc(CC) of
+    false -> {aborted, invalid_person_cc};
+    true -> Qt = length(person_requests(CC)),
+            {atomic, Qt}
+  end.
+
 add_request(ID, CC) ->
   case exist_book_id(ID) of
     false -> {aborted, invalid_book_id};
     true -> case exist_person_cc(CC) of
               false -> {aborted, invalid_person_cc};
-              true -> case book_is_requested(ID) of % See if already requested
+              true -> case book_is_requested(ID) of % See if already requested, doesn't matter by who.
                         false -> add_entry(#request{id={ID, CC}, valid=true}), {atomic};
-                        true  -> {aborted, book_is_requested}
+                        true  -> {aborted, invalid_request}
                       end
             end
   end.
@@ -127,7 +152,10 @@ remove_request(ID, CC) ->
               false -> {aborted, invalid_person_cc};
               % BUG HERE: if theres no such entry, add one false returned
               %           Care can be requested by other
-              true -> add_entry(#request{id={ID, CC}, valid=false}), {atomic}
+              true -> case member(ID, person_requests(CC)) of % If the book is requested by the person
+                        false -> {aborted, invalid_return};
+                        true -> add_entry(#request{id={ID, CC}, valid=false}), {atomic}
+                      end
             end
   end.
 
