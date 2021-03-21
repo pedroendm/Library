@@ -5,26 +5,26 @@
 -import(lists, [member/2, foreach/2]).
 -import(utils, [empty_list/1, or_list/1]).
 
--export([setup/0, start/0, loop/0,
-         show_table/1, person_requests/1, book_requests/1,
-         add_person/4, remove_person/1]).
+-export([start/0, setup/0, valid/2]).
 
-% person's primary key: nrCC
--record(person, {cc, name, address, phone}).
-% book's primary key: id
 -record(book, {id, title, authors}).
-% request's primary key: {id(book), nrCC(person)}
--record(request, {id, valid}).
+-record(person, {cc, name, address, phone}).
+-record(request, {id, cc}).
 
-
-bookshelf() -> [
+bd() -> [
+  % Books
   {book, 1, "Programming Erlang: software for a concurrent world", {"Joe Armstrong"}},
   {book, 2, "The little book of Semaphores", {"Allen B. Downey"}},
-  {book, 3, "Programming Erlang: software for a concurrent world", {"Joe Armstrong"}}
+  {book, 3, "Programming Erlang: software for a concurrent world", {"Joe Armstrong"}},
+  {book, 4, "Numerical Otimization", {"Jorge Nocedal", "Stephen J. Wrigth"}},
+  {book, 5, "A first course in mathematical modeling", {"Frank R. Giordano", "William P. Fox", "Steven B. Horton"}},
+  {book, 6, "Convex Optimization", {"Stephen Boyd", "Lieven Vandenberghe"}},
 
-  %{book, 3, "Numerical Otimization", ["Jorge Nocedal", "Stephen J. Wrigth"]},
-  %{book, 4, "A first course in mathematical modeling", ["Frank R. Giordano", "William P. Fox", "Steven B. Horton"]},
-  %{book, 5, "Convex Optimization", ["Stephen Boyd", "Lieven Vandenberghe"]}
+  % People
+  {person, 10, "Tommy Shelby", "Birmingham", 1231812},
+  {person, 20, "Tyrion Lannister", "Casterly Rock", 2312321},
+  {person, 30, "The Professor", "Spain", 8978221},
+  {person, 40, "Dolores", "WestWorld", 7481262}
 ].
 
 setup() ->
@@ -34,35 +34,81 @@ setup() ->
     mnesia:create_table(book, [{attributes, record_info(fields, book)}]),
     mnesia:create_table(request, [{attributes, record_info(fields, request)}]),
     mnesia:wait_for_tables([person, book, request], 20000),
-    mnesia:transaction(fun() -> foreach(fun mnesia:write/1, bookshelf()) end).
+    mnesia:transaction(fun() -> foreach(fun mnesia:write/1, bd()) end).
 
 loop() ->
   receive
-    {show_table, From, Table} -> From ! show_table(Table), loop();
-    {add_person, From, CC, Name, Address, Phone} -> From ! add_person(CC, Name, Address, Phone), loop();
-    {remove_person, From, CC} -> From ! remove_person(CC), loop();
-
     % Lookup
-    {person_requests, From, CC} -> From ! person_requests(CC), loop();
-    {book_requests, From, Title} -> From ! book_requests(Title), loop();
-    {book_is_requested, From, ID} -> From ! book_is_requested(ID), loop();
-    {book_ids, From, Title} -> From ! book_ids(Title), loop();
+    {person_requests, From, CC}     -> From ! person_requests(CC), loop();
+    {book_requests, From, Title}    -> From ! book_requests(Title), loop();
+    {book_is_requested, From, ID}   -> From ! book_is_requested(ID), loop();
+    {book_ids, From, Title}         -> From ! book_ids(Title), loop();
     {person_num_requests, From, CC} -> From ! person_num_requests(CC), loop();
 
     % Update
-    {add_request, From, ID, CC} -> From ! add_request(ID, CC), loop();
-    {remove_request, From, ID, CC} -> From ! remove_request(ID, CC), loop()
+    {add_request, From, ID, CC}     -> From ! add_request(ID, CC), loop();
+    {remove_request, From, ID, CC}  -> From ! remove_request(ID, CC), loop()
   end.
 
 start() -> spawn(fun() -> setup(), loop() end).
 
-% Entry :: {tableName, attributes}
-add_entry(Entry) ->
-  mnesia:transaction(fun() -> mnesia:write(Entry) end).
 
-% OId :: {tableName, PK}
-remove_entry(OId) ->
-  mnesia:transaction(fun() -> mnesia:delete(OId) end).
+person_requests(CC) ->
+  case valid(person, CC) of
+    false -> {aborted, invalid_person_cc};
+    true -> Requests = do(qlc:q([element(1, X#request.id) || X <- mnesia:table(request), element(2, X#request.id) == CC])), {atomic, Requests}
+  end.
+
+book_requests(Title) ->
+  case valid(book, Title) of
+    false -> {aborted, invalid_book_title};
+    true -> IDs = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])), % Get possible codes for the book with title 'Title'
+            CCs = do(qlc:q([X#request.cc || X <- mnesia:table(request), member(X#request.id, IDs)])),  % Get every person that request one of this codes
+            {atomic, CCs}
+  end.
+
+book_is_requested(ID) ->
+  case valid(book, ID) of
+    false -> {aborted, invalid_book_id};
+    true -> Q = do(qlc:q([X || X <- mnesia:table(request), X#request.id == ID])), {atomic, not(Q == [])}
+  end.
+
+book_ids(Title) ->
+  case valid(book, Title) of
+    false -> {aborted, invalid_book_title};
+    true -> IDs = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])), {atomic, IDs}
+  end.
+
+person_num_requests(CC) ->
+  case valid(person, CC) of
+    false -> {aborted, invalid_person_cc};
+    true -> Qt = length(person_requests(CC)), {atomic, Qt}
+  end.
+
+add_request(ID, CC) ->
+  case valid(book, ID) of
+    false -> {aborted, invalid_book_id};
+    true -> case valid(person, CC) of
+              false -> {aborted, invalid_person_cc};
+              true -> case book_is_requested(ID) of
+                        {atomic, false} -> add_entry(#request{id=ID, cc=CC}), {atomic};
+                        {atomic, true}  -> {aborted, invalid_request}
+                      end
+            end
+  end.
+
+remove_request(ID, CC) ->
+  case valid(book, ID) of
+    false -> {aborted, invalid_book_id};
+    true -> case valid(person, CC) of
+              false -> {aborted, invalid_person_cc};
+              true -> case valid(request, {ID, CC}) of 
+                        false -> {aborted, invalid_return};
+                        true -> remove_entry(#request{id=ID, cc=CC}), {atomic}
+                      end
+            end
+  end.
+
 
 do(Q) ->
   F = fun() -> qlc:e(Q) end,
@@ -71,102 +117,17 @@ do(Q) ->
     {aborted, Reason} -> Reason
   end.
 
-show_table(Table) ->
-  do(qlc:q([X || X <- mnesia:table(Table)])).
+add_entry(Entry) -> % Entry :: {tableName, attributes}
+  mnesia:transaction(fun() -> mnesia:write(Entry) end).
 
+remove_entry(OId) -> % OId :: {tableName, PK}
+  mnesia:transaction(fun() -> mnesia:delete(OId) end).
 
-add_person(CC, Name, Address, Phone) ->
-  case exist_person_cc(CC) of
-     false -> add_entry(#person{cc=CC, name=Name, address=Address, phone=Phone}), {atomic};
-     true -> {aborted, duplicate_person_cc}
+valid(Entity, Value) ->
+  NotEmptyList = fun([]) -> false; (_) -> true end,
+  Or = fun(false, false) -> false; (_, _) -> true end,
+  case Entity of
+    book    -> NotEmptyList(do(qlc:q([X || X <- mnesia:table(book), Or(X#book.id == Value, X#book.title == Value)])));
+    person  -> NotEmptyList(do(qlc:q([X || X <- mnesia:table(person), X#person.cc == Value])));
+    request -> NotEmptyList(do(qlc:q([X || X <- mnesia:table(request), X#request.id == element(1, Value), X#request.cc == element(2, Value)])))
   end.
-
-remove_person(CC) ->
-  case exist_person_cc(CC) of
-    false -> {aborted, invalid_person_cc};
-    true ->  OId = {person, CC}, remove_entry(OId), {atomic}
-  end.
-
-
-% Returns a list with the books' id requested by the person with CC number 'NrCC'
-person_requests(CC) ->
-  case exist_person_cc(CC) of
-    false -> {aborted, invalid_person_cc};
-    true -> Requests = do(qlc:q([element(1, X#request.id) || X <- mnesia:table(request), element(2, X#request.id) == CC])),
-            {atomic, Requests}
-  end.
-
-% Returns a list with the people that request the book with title "Title"
-book_requests(Title) ->
-  case exist_book_title(Title) of
-    false -> {aborted, invalid_book_title};
-    true ->
-      % Get possible codes for the book with title Title
-      IDs = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])),
-      % Get every person that request one of this codes
-      CCs = do(qlc:q([element(2, X#request.id) || X <- mnesia:table(request), member(element(1, X#request.id), IDs)])),
-      {atomic, CCs}
-  end.
-
-% Returns true if the book is already requested, false otherwise.
-book_is_requested(ID) ->
-  case exist_book_id(ID) of
-    false -> {aborted, invalid_book_id};
-    true -> Flags = do(qlc:q([X#request.valid || X <- mnesia:table(request), element(1, X#request.id) == ID])),
-            Is_Requested = utils:or_list(Flags),
-            {atomic, Is_Requested}
-  end.
-
-% Returns the ids of the book with title 'Title'
-book_ids(Title) ->
-  case exist_book_title(Title) of
-    false -> {aborted, invalid_book_title};
-    true -> IDs = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])),
-            {atomic, IDs}
-  end.
-
-% Returns the number of requests made by the person with CC number 'CC'
-person_num_requests(CC) ->
-  case exist_person_cc(CC) of
-    false -> {aborted, invalid_person_cc};
-    true -> Qt = length(person_requests(CC)),
-            {atomic, Qt}
-  end.
-
-add_request(ID, CC) ->
-  case exist_book_id(ID) of
-    false -> {aborted, invalid_book_id};
-    true -> case exist_person_cc(CC) of
-              false -> {aborted, invalid_person_cc};
-              true -> case book_is_requested(ID) of % See if already requested, doesn't matter by who.
-                        false -> add_entry(#request{id={ID, CC}, valid=true}), {atomic};
-                        true  -> {aborted, invalid_request}
-                      end
-            end
-  end.
-
-remove_request(ID, CC) ->
-  case exist_book_id(ID) of
-    false -> {aborted, invalid_book_id};
-    true -> case exist_person_cc(CC) of
-              false -> {aborted, invalid_person_cc};
-              % BUG HERE: if theres no such entry, add one false returned
-              %           Care can be requested by other
-              true -> case member(ID, person_requests(CC)) of % If the book is requested by the person
-                        false -> {aborted, invalid_return};
-                        true -> add_entry(#request{id={ID, CC}, valid=false}), {atomic}
-                      end
-            end
-  end.
-
-exist_person_cc(CC) ->
-  People = do(qlc:q([X || X <- mnesia:table(person), X#person.cc == CC])),
-  not(utils:empty_list(People)).
-
-exist_book_title(Title) ->
-  Books = do(qlc:q([X || X <- mnesia:table(book), X#book.title == Title])),
-  not(utils:empty_list(Books)).
-
-exist_book_id(ID) ->
-  Books = do(qlc:q([X || X <- mnesia:table(book), X#book.id == ID])),
-  not(utils:empty_list(Books)).
