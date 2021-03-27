@@ -101,7 +101,7 @@ person_requests(CC) ->
 book_requests(Title) ->
   case valid(book, Title) of
     false -> {aborted, invalid_book_title};
-    true -> IDs = do(qlc:q([X#book.id || X <- mnesia:table(book), X#book.title == Title])),            % Get possible codes for the book with title 'Title'
+    true -> {atomic, IDs} = book_ids(Title),                                                           % Get possible codes for the book with title 'Title'
             CCs = do(qlc:q([X#request.cc || X <- mnesia:table(request), member(X#request.id, IDs)])),  % Get every person that request one of this codes
             {atomic, sort(CCs)}
   end.
