@@ -3,7 +3,6 @@
 -include_lib("stdlib/include/qlc.hrl").
 
 -import(lists, [member/2, foreach/2, sort/1]).
--import(utils, [empty_list/1, or_list/1]).
 
 -export([start/0]).
 
